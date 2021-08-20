@@ -1,32 +1,88 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"regexp"
 )
+
+type requestPayloadStruct struct {
+	ProxyCondition string `json:"proxy_condition"`
+}
 
 var rEverything = regexp.MustCompile(`.*`) // Route these to the backend ES cluster
 var rDoc = regexp.MustCompile(`/_doc`)     //any singular indexing operation
 
-func proxy(w http.ResponseWriter, r *http.Request) {
-	requestDump, err := httputil.DumpRequest(r, true)
+// Serve a reverse proxy for a given url
+func serveReverseProxy(target string, res http.ResponseWriter, req *http.Request) {
+	// parse the url
+	url, _ := url.Parse(target)
+
+	// create the reverse proxy
+	proxy := httputil.NewSingleHostReverseProxy(url)
+
+	// Update the headers to allow for SSL redirection
+	req.URL.Host = url.Host
+	req.URL.Scheme = url.Scheme
+	req.Header.Set("X-Forwarded-Host", req.Header.Get("Host"))
+	req.Host = url.Host
+
+	// Note that ServeHttp is non blocking and uses a go routine under the hood
+	proxy.ServeHTTP(res, req)
+}
+
+// Get a json decoder for a given requests body
+func requestBodyDecoder(request *http.Request) *json.Decoder {
+	// Read body to buffer
+	body, err := ioutil.ReadAll(request.Body)
 	if err != nil {
-		fmt.Println(err)
+		log.Printf("Error reading body: %v", err)
+		panic(err)
 	}
-	fmt.Println(string(requestDump))
-	//proxy this request through to the backend ES cluster and return the response (choose cluster based on config file)
+
+	// Because go lang is a pain in the ass if you read the body then any susequent calls
+	// are unable to read the body again....
+	request.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+
+	return json.NewDecoder(ioutil.NopCloser(bytes.NewBuffer(body)))
+}
+
+// Parse the requests body
+func parseRequestBody(request *http.Request) requestPayloadStruct {
+	decoder := requestBodyDecoder(request)
+
+	var requestPayload requestPayloadStruct
+	err := decoder.Decode(&requestPayload)
+
+	if err != nil {
+		panic(err)
+	}
+
+	return requestPayload
+}
+
+// Given a request send it to the appropriate url
+func proxy(res http.ResponseWriter, req *http.Request) {
+	// backing cluster URL
+	url := "http://localhost:9200"
+	serveReverseProxy(url, res, req)
 }
 
 func home(w http.ResponseWriter, r *http.Request) {
+	//this could be proxied through if needed too
+	w.Header().Set("Content-Type", "application/json")
 	//return string as json
-	fmt.Fprintf(w, "{  \"name\" : \"instance-0000000045\",  \"cluster_name\" : \"ddc7994029894f8d8ed1847318505939\",  \"cluster_uuid\" : \"VJM2yDPqTLaaXEK0wAO-sA\",  \"version\" : {    \"number\" : \"7.13.2\",    \"build_flavor\" : \"default\",    \"build_type\" : \"docker\",    \"build_hash\" : \"4d960a0733be83dd2543ca018aa4ddc42e956800\",    \"build_date\" : \"2021-06-10T21:01:55.251515791Z\",    \"build_snapshot\" : false,    \"lucene_version\" : \"8.8.2\",    \"minimum_wire_compatibility_version\" : \"6.8.0\",    \"minimum_index_compatibility_version\" : \"6.0.0-beta1\"  },  \"tagline\" : \"You Know, for Search\"}")
+	fmt.Fprintf(w, "{  \"name\" : \"mocked\",  \"cluster_name\" : \"mocked\",  \"cluster_uuid\" : \"mo-sA\",  \"version\" : {    \"number\" : \"7.13.2\",    \"build_flavor\" : \"default\",    \"build_type\" : \"docker\",    \"build_hash\" : \"4d960a0733be83dd2543ca018aa4ddc42e956800\",    \"build_date\" : \"2021-06-10T21:01:55.251515791Z\",    \"build_snapshot\" : false,    \"lucene_version\" : \"8.8.2\",    \"minimum_wire_compatibility_version\" : \"6.8.0\",    \"minimum_index_compatibility_version\" : \"6.0.0-beta1\"  },  \"tagline\" : \"You Know, for Search\"}")
 }
 
 func bulk(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	//mock bulk API response
 	resp := make(map[string]string)
 	resp["message"] = "Bulked"
@@ -46,10 +102,24 @@ func bulk(w http.ResponseWriter, r *http.Request) {
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
-	//mock POST index/_doc API response
-	resp := make(map[string]string)
-	resp["message"] = "Indexed"
-	jsonResp, err := json.Marshal(resp)
+	w.Header().Set("Content-Type", "application/json")
+	//mock bulk API response
+	h := json.RawMessage(`{
+		"_index" : "mocked",
+		"_type" : "_doc",
+		"_id" : "mocked",
+		"_version" : 1,
+		"result" : "created",
+		"_shards" : {
+		  "total" : 2,
+		  "successful" : 1,
+		  "failed" : 0
+		},
+		"_seq_no" : 0,
+		"_primary_term" : 1
+	  }`)
+
+	jsonResp, err := json.Marshal(h)
 	if err != nil {
 		log.Fatalf("Error happened in JSON marshal. Err: %s", err)
 	}
@@ -57,7 +127,7 @@ func index(w http.ResponseWriter, r *http.Request) {
 }
 
 func route(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+
 	//authenticate supplied credentials
 	switch {
 	case r.URL.Path == "/":
