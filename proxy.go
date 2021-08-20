@@ -1,20 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
 )
-
-type requestPayloadStruct struct {
-	ProxyCondition string `json:"proxy_condition"`
-}
 
 var rEverything = regexp.MustCompile(`.*`) // Route these to the backend ES cluster
 var rDoc = regexp.MustCompile(`/_doc`)     //any singular indexing operation
@@ -35,36 +29,6 @@ func serveReverseProxy(target string, res http.ResponseWriter, req *http.Request
 
 	// Note that ServeHttp is non blocking and uses a go routine under the hood
 	proxy.ServeHTTP(res, req)
-}
-
-// Get a json decoder for a given requests body
-func requestBodyDecoder(request *http.Request) *json.Decoder {
-	// Read body to buffer
-	body, err := ioutil.ReadAll(request.Body)
-	if err != nil {
-		log.Printf("Error reading body: %v", err)
-		panic(err)
-	}
-
-	// Because go lang is a pain in the ass if you read the body then any susequent calls
-	// are unable to read the body again....
-	request.Body = ioutil.NopCloser(bytes.NewBuffer(body))
-
-	return json.NewDecoder(ioutil.NopCloser(bytes.NewBuffer(body)))
-}
-
-// Parse the requests body
-func parseRequestBody(request *http.Request) requestPayloadStruct {
-	decoder := requestBodyDecoder(request)
-
-	var requestPayload requestPayloadStruct
-	err := decoder.Decode(&requestPayload)
-
-	if err != nil {
-		panic(err)
-	}
-
-	return requestPayload
 }
 
 // Given a request send it to the appropriate url
@@ -132,9 +96,9 @@ func route(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/":
 		home(w, r)
-	case r.URL.Path == "/_bulk":
+	case (r.URL.Path == "/_bulk" && r.Method == "POST"):
 		bulk(w, r)
-	case rDoc.MatchString(r.URL.Path):
+	case (rDoc.MatchString(r.URL.Path) && r.Method == "POST"):
 		index(w, r)
 	case rEverything.MatchString(r.URL.Path):
 		proxy(w, r)
